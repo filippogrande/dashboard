@@ -12,8 +12,14 @@ import requests
 
 import re
 import time
+import logging
 
 load_dotenv()
+
+# Configure logging
+LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
+logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format='%(asctime)s %(levelname)s %(message)s')
+logger = logging.getLogger(__name__)
 
 APP_ROOT = Path(__file__).parent
 # If SERVICE_ROOT is set (mounted host folder), use it as source of services.json, images and compose files
@@ -147,16 +153,20 @@ def fetch_kuma_metrics():
         return _KUMA_METRICS_CACHE['data']
     try:
         url = UPTIME_KUMA_URL.rstrip('/') + '/metrics'
+        logger.info('Fetching Uptime Kuma metrics from %s', url)
         if UPTIME_KUMA_API_KEY:
             resp = requests.get(url, auth=('', UPTIME_KUMA_API_KEY), timeout=5)
         else:
             resp = requests.get(url, timeout=5)
         resp.raise_for_status()
+        logger.info('Uptime Kuma returned status %s; bytes=%d', resp.status_code, len(resp.text or ''))
         parsed = _parse_prom_metrics(resp.text)
+        logger.info('Parsed %d monitors from Kuma metrics', len(parsed))
         _KUMA_METRICS_CACHE['ts'] = now
         _KUMA_METRICS_CACHE['data'] = parsed
         return parsed
     except Exception:
+        logger.exception('Error fetching/parsing Uptime Kuma metrics')
         return {}
 
 
@@ -234,12 +244,15 @@ def api_services():
     # try to fetch uptime kuma metrics (optional)
     kuma = fetch_kuma_metrics()
     matched_monitors = set()
+    logger.info('Loaded %d services; kuma monitors=%d', len(services), len(kuma))
     for s in services:
         s['status'] = get_status(s)
+        logger.debug('Service %s status=%s', s.get('name'), s['status'])
         # enrich with uptime kuma info when possible
         try:
             s_url = s.get('url')
             s_name = s.get('name')
+            logger.debug('Matching service name=%s url=%s against kuma keys', s_name, s_url)
             # try match by url first, then by name
             monitor = None
             monitor_key = None
@@ -247,10 +260,12 @@ def api_services():
                 key = 'url:' + s_url.rstrip('/')
                 monitor = kuma.get(key)
                 monitor_key = key
+                logger.debug('Tried key %s -> %s', key, 'found' if monitor else 'not found')
             if not monitor and s_name:
                 key = 'name:' + s_name.lower()
                 monitor = kuma.get(key)
                 monitor_key = key
+                logger.debug('Tried key %s -> %s', key, 'found' if monitor else 'not found')
             if monitor and isinstance(monitor, dict):
                 # record matched monitor to avoid duplicates later
                 m_name = (monitor.get('name') or '').lower()
@@ -264,14 +279,18 @@ def api_services():
                     # normalize for frontend badges
                     s['kuma_status'] = label.lower()
                     s['kuma_color'] = {'UP': 'green', 'DOWN': 'red', 'PENDING': 'yellow', 'MAINTENANCE': 'yellow'}.get(label, 'gray')
+                    logger.info('Service %s matched monitor %s -> status %s', s_name, monitor.get('name'), label)
                 else:
                     s['uptime'] = None
                     s['kuma_status'] = 'unknown'
                     s['kuma_color'] = 'gray'
+                    logger.warning('Service %s matched a monitor but monitor has no status_code: %s', s_name, monitor)
             else:
                 s['uptime'] = None
+                logger.info('No Kuma monitor matched for service %s (tried url and name)', s_name)
         except Exception:
             s['uptime'] = None
+            logger.exception('Error enriching service %s with Kuma info', s.get('name'))
     # Append Kuma-only monitors (those not matched to any service)
     # Build a set of unique monitors from kuma mapping
     seen = set()
