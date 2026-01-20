@@ -16,8 +16,8 @@ import logging
 
 load_dotenv()
 
-# Configure logging
-LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
+# Configure logging (default DEBUG so logs are visible without extra env)
+LOG_LEVEL = os.environ.get('LOG_LEVEL', 'DEBUG').upper()
 logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -248,6 +248,19 @@ def api_services():
     for s in services:
         s['status'] = get_status(s)
         logger.debug('Service %s status=%s', s.get('name'), s['status'])
+        # default kuma_status/color derived from local status so UI shows meaningful badge
+        if s['status'] == 'running':
+            s['kuma_status'] = 'up'
+            s['kuma_color'] = 'green'
+        elif s['status'] == 'stopped':
+            s['kuma_status'] = 'down'
+            s['kuma_color'] = 'red'
+        elif s['status'] == 'missing':
+            s['kuma_status'] = 'unknown'
+            s['kuma_color'] = 'gray'
+        else:
+            s['kuma_status'] = 'unknown'
+            s['kuma_color'] = 'gray'
         # enrich with uptime kuma info when possible
         try:
             s_url = s.get('url')
