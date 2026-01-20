@@ -10,6 +10,9 @@ from flask import Flask, render_template, jsonify, request, send_from_directory,
 from dotenv import load_dotenv
 import requests
 
+import re
+import time
+
 load_dotenv()
 
 APP_ROOT = Path(__file__).parent
@@ -93,66 +96,68 @@ def load_services():
 UPTIME_KUMA_URL = os.environ.get('UPTIME_KUMA_URL')
 UPTIME_KUMA_API_KEY = os.environ.get('UPTIME_KUMA_API_KEY')
 
+# Cache for Kuma metrics (seconds)
+_KUMA_METRICS_CACHE = { 'ts': 0, 'data': {} }
+KUMA_CACHE_TTL = int(os.environ.get('KUMA_CACHE_TTL', '15'))
 
-def fetch_kuma_monitors():
-    """Try to fetch monitors from Uptime Kuma. Returns mapping by name and by url."""
+
+def _parse_prom_metrics(text):
+    """Parse Prometheus exposition text and extract monitor_status values.
+    Returns a dict keyed by 'url:<url>' and 'name:<lower>' mapping to {'status_code': int}.
+    """
+    metric_re = re.compile(r'^(?P<metric>[a-zA-Z_:0-9]+)\{(?P<labels>[^}]*)\}\s+(?P<value>[-0-9.eE]+)')
+
+    def parse_labels(s):
+        d = {}
+        for k, v in re.findall(r'(\w+)="([^"\\]*)"', s):
+            d[k] = v
+        return d
+
+    monitors = {}
+    for line in text.splitlines():
+        m = metric_re.match(line)
+        if not m:
+            continue
+        metric = m.group('metric')
+        labels = parse_labels(m.group('labels'))
+        try:
+            value = float(m.group('value'))
+        except Exception:
+            continue
+        name = labels.get('monitor_name')
+        url = labels.get('monitor_url')
+        key_url = f"url:{url.rstrip('/')}" if url else None
+        key_name = f"name:{name.lower()}" if name else None
+        entry_key = key_url or key_name or ('id:' + labels.get('monitor_id', ''))
+        if entry_key not in monitors:
+            monitors[entry_key] = {'name': name, 'url': url}
+        if metric == 'monitor_status':
+            monitors[entry_key]['status_code'] = int(value)
+    return monitors
+
+
+def fetch_kuma_metrics():
+    """Fetch and parse /metrics from Uptime Kuma, with simple caching.
+    Returns mapping keyed by url:<...> and name:<...> with status_code.
+    """
     if not UPTIME_KUMA_URL:
         return {}
+    now = time.time()
+    if now - _KUMA_METRICS_CACHE['ts'] < KUMA_CACHE_TTL and _KUMA_METRICS_CACHE['data']:
+        return _KUMA_METRICS_CACHE['data']
     try:
-        base = UPTIME_KUMA_URL.rstrip('/')
-        endpoints = [
-            base + '/api/getMonitors',
-            base + '/api/monitors',
-            base + '/api/get-monitors',
-        ]
-        headers = {}
+        url = UPTIME_KUMA_URL.rstrip('/') + '/metrics'
         if UPTIME_KUMA_API_KEY:
-            headers['Authorization'] = f'Bearer {UPTIME_KUMA_API_KEY}'
-        for url in endpoints:
-            try:
-                resp = requests.get(url, headers=headers, timeout=5)
-            except Exception:
-                continue
-            if resp.status_code != 200:
-                continue
-            j = resp.json()
-            # Try to extract monitors list flexibly
-            if isinstance(j, dict):
-                if 'monitors' in j and isinstance(j['monitors'], list):
-                    monitors = j['monitors']
-                elif 'data' in j and isinstance(j['data'], list):
-                    monitors = j['data']
-                else:
-                    # maybe the response itself is the list
-                    monitors = [v for v in j.get('monitors', [])] if 'monitors' in j else None
-            elif isinstance(j, list):
-                monitors = j
-            else:
-                monitors = None
-            if not monitors:
-                # try direct list parse
-                try:
-                    monitors = resp.json()
-                except Exception:
-                    monitors = None
-            if not monitors:
-                continue
-            mapping = {}
-            for m in monitors:
-                # try to extract name and url fields
-                name = m.get('name') if isinstance(m, dict) else None
-                mon_url = None
-                if isinstance(m, dict):
-                    mon_url = m.get('url') or m.get('address') or m.get('hostname')
-                entry = m if isinstance(m, dict) else {'raw': m}
-                if name:
-                    mapping.setdefault('name:' + name.lower(), entry)
-                if mon_url:
-                    mapping.setdefault('url:' + mon_url.rstrip('/'), entry)
-            return mapping
+            resp = requests.get(url, auth=('', UPTIME_KUMA_API_KEY), timeout=5)
+        else:
+            resp = requests.get(url, timeout=5)
+        resp.raise_for_status()
+        parsed = _parse_prom_metrics(resp.text)
+        _KUMA_METRICS_CACHE['ts'] = now
+        _KUMA_METRICS_CACHE['data'] = parsed
+        return parsed
     except Exception:
         return {}
-    return {}
 
 
 def compose_path_for(service):
@@ -226,28 +231,27 @@ def index():
 @app.route('/api/services')
 def api_services():
     services = load_services()
-    # try to fetch uptime kuma monitors (optional)
-    kuma = fetch_kuma_monitors()
+    # try to fetch uptime kuma metrics (optional)
+    kuma = fetch_kuma_metrics()
     for s in services:
         s['status'] = get_status(s)
         # enrich with uptime kuma info when possible
         try:
             s_url = s.get('url')
             s_name = s.get('name')
+            # try match by url first, then by name
             monitor = None
             if s_url:
                 monitor = kuma.get('url:' + s_url.rstrip('/'))
             if not monitor and s_name:
                 monitor = kuma.get('name:' + s_name.lower())
-            if monitor:
-                # attach a lightweight monitor summary
-                s['uptime_monitor'] = {
-                    'name': monitor.get('name'),
-                    'url': monitor.get('url') or monitor.get('address') or monitor.get('hostname'),
-                    'raw': monitor,
-                }
-                # try to infer a status field
-                s['uptime'] = monitor.get('status') or monitor.get('state') or monitor.get('httpStatus')
+            if monitor and isinstance(monitor, dict):
+                # we only care about the status code from Kuma metrics
+                status_code = monitor.get('status_code')
+                if status_code is not None:
+                    s['uptime'] = {'code': status_code, 'label': {1:'UP',0:'DOWN',2:'PENDING',3:'MAINTENANCE'}.get(status_code, 'UNKNOWN')}
+                else:
+                    s['uptime'] = None
             else:
                 s['uptime'] = None
         except Exception:
