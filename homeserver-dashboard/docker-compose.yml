@@ -1,0 +1,20 @@
+version: "3.8"
+services:
+  dashboard:
+    build: .
+    ports:
+      - "5000:5000"
+    # Optional: load env vars from .env in this folder
+    env_file:
+      - .env
+    environment:
+      # folder inside container where services.json, images/ and compose files live
+      SERVICE_ROOT: /srv/services
+      # optional Uptime Kuma integration (set in .env or environment)
+      UPTIME_KUMA_URL: ${UPTIME_KUMA_URL:-}
+      UPTIME_KUMA_API_KEY: ${UPTIME_KUMA_API_KEY:-}
+      # Note: compose files are expected under SERVICE_ROOT (mounted volume)
+    volumes:
+      # mount a host folder that contains services.json, images/ and compose files
+      - ./data:/srv/services:rw
+    restart: unless-stopped

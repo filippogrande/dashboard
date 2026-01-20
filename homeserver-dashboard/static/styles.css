@@ -1,0 +1,19 @@
+/* Small refinements beyond Tailwind for smoother UI */
+html,body{height:100%;}
+body{background:#f8fafc;}
+.card-hover{transition:transform .18s ease, box-shadow .18s ease;}
+.card-hover:hover{transform:translateY(-4px);box-shadow:0 8px 20px rgba(2,6,23,0.06);} 
+.status-dot{width:10px;height:10px;border-radius:9999px;display:inline-block;margin-right:8px}
+.fade-in{animation:fadeIn .18s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+/* Dark theme overrides */
+.dark body, .dark .antialiased { background: #0b1220; color: #cbd5e1 }
+.dark .card-hover{ background: #071026 }
+.dark .card-hover:hover{ box-shadow: 0 10px 30px rgba(2,6,23,0.6); transform: translateY(-4px) }
+.dark .status-dot { box-shadow: 0 0 0 3px rgba(255,255,255,0.02) }
+.dark .text-slate-500 { color: #94a3b8 !important }
+.dark .text-slate-900 { color: #e6eef8 !important }
+.dark .bg-slate-200 { background: #111827 !important }
+.dark .bg-gradient-to-br { filter: saturate(1.1) brightness(0.9) }
+

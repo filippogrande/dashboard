@@ -1,0 +1,23 @@
+[
+  {
+    "name": "Home Assistant",
+    "icon": "home.svg",
+    "compose": "home-assistant/docker-compose.yml",
+    "controls": true,
+    "url": "http://localhost:8123"
+  },
+  {
+    "name": "Transmission",
+    "icon": "download.svg",
+    "compose": "transmission/docker-compose.yml",
+    "controls": true,
+    "url": "http://localhost:9091"
+  },
+  {
+    "name": "Uptime Kuma",
+    "icon": "uptime.svg",
+    "compose": "uptime-kuma/docker-compose.yml",
+    "controls": false,
+    "url": "http://localhost:3001"
+  }
+]
