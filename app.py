@@ -259,9 +259,15 @@ def api_services():
                 # we only care about the status code from Kuma metrics
                 status_code = monitor.get('status_code')
                 if status_code is not None:
-                    s['uptime'] = {'code': status_code, 'label': {1: 'UP', 0: 'DOWN', 2: 'PENDING', 3: 'MAINTENANCE'}.get(status_code, 'UNKNOWN')}
+                    label = {1: 'UP', 0: 'DOWN', 2: 'PENDING', 3: 'MAINTENANCE'}.get(status_code, 'UNKNOWN')
+                    s['uptime'] = {'code': status_code, 'label': label}
+                    # normalize for frontend badges
+                    s['kuma_status'] = label.lower()
+                    s['kuma_color'] = {'UP': 'green', 'DOWN': 'red', 'PENDING': 'yellow', 'MAINTENANCE': 'yellow'}.get(label, 'gray')
                 else:
                     s['uptime'] = None
+                    s['kuma_status'] = 'unknown'
+                    s['kuma_color'] = 'gray'
             else:
                 s['uptime'] = None
         except Exception:
@@ -282,8 +288,13 @@ def api_services():
         # create lightweight kuma-only card
         status_code = entry.get('status_code')
         uptime = None
+        kuma_status = 'unknown'
+        kuma_color = 'gray'
         if status_code is not None:
-            uptime = {'code': status_code, 'label': {1: 'UP', 0: 'DOWN', 2: 'PENDING', 3: 'MAINTENANCE'}.get(status_code, 'UNKNOWN')}
+            label = {1: 'UP', 0: 'DOWN', 2: 'PENDING', 3: 'MAINTENANCE'}.get(status_code, 'UNKNOWN')
+            uptime = {'code': status_code, 'label': label}
+            kuma_status = label.lower()
+            kuma_color = {'UP': 'green', 'DOWN': 'red', 'PENDING': 'yellow', 'MAINTENANCE': 'yellow'}.get(label, 'gray')
         kuma_item = {
             'name': entry.get('name') or f'kuma-{entry.get("monitor_id","")}',
             'icon': None,
@@ -291,6 +302,8 @@ def api_services():
             'status': 'unknown',
             'uptime': uptime,
             'kuma_only': True,
+            'kuma_status': kuma_status,
+            'kuma_color': kuma_color,
         }
         services.append(kuma_item)
 
