@@ -170,6 +170,25 @@ def fetch_kuma_metrics():
         return {}
 
 
+def find_kuma_monitor_for_service(service, kuma):
+    """Return the parsed kuma monitor dict for a service if present."""
+    if not kuma:
+        return None
+    s_url = service.get('url')
+    s_name = service.get('name')
+    if s_url:
+        key = 'url:' + s_url.rstrip('/')
+        m = kuma.get(key)
+        if m:
+            return m
+    if s_name:
+        key = 'name:' + s_name.lower()
+        m = kuma.get(key)
+        if m:
+            return m
+    return None
+
+
 def compose_path_for(service):
     path = Path(service.get('compose', ''))
     if path.is_absolute():
@@ -195,19 +214,50 @@ def user_image(filename):
     abort(404)
 
 
-def get_status(service):
+def get_status(service, kuma=None):
+    """Determine local status of a service.
+
+    Priority:
+      1. docker compose ps (if available)
+      2. Uptime Kuma match (if available)
+      3. simple HTTP probe to the service `url` (if present)
+      4. fallback to 'unknown'
+    """
     compose_path = compose_path_for(service)
     if not compose_path.exists():
         return 'missing'
     try:
         p = subprocess.run(['docker', 'compose', '-f', str(compose_path), 'ps'], capture_output=True, text=True, timeout=30)
-        out = p.stdout + p.stderr
-        if p.returncode != 0:
-            return 'stopped'
+        out = (p.stdout or '') + (p.stderr or '')
         if 'Up' in out:
             return 'running'
+        if p.returncode != 0:
+            return 'stopped'
         return 'stopped'
+    except FileNotFoundError:
+        logger.warning('docker CLI not found; falling back to Kuma/HTTP probe for %s', service.get('name'))
+        # try match with Kuma if provided
+        try:
+            mon = find_kuma_monitor_for_service(service, kuma)
+            if mon and isinstance(mon, dict):
+                sc = mon.get('status_code')
+                if sc is not None:
+                    return 'running' if sc == 1 else 'stopped'
+        except Exception:
+            logger.debug('Kuma fallback failed for %s', service.get('name'))
+        # last-resort: HTTP probe to service URL
+        url = service.get('url')
+        if url:
+            try:
+                # allow insecure to cope with local self-signed certs
+                resp = requests.get(url, timeout=3, allow_redirects=True, verify=False)
+                if resp.status_code and resp.status_code < 400:
+                    return 'running'
+                return 'stopped'
+            except Exception:
+                return 'unknown'
     except Exception:
+        logger.exception('Error running docker compose ps for %s', service.get('name'))
         return 'unknown'
 
 
