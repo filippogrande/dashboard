@@ -134,12 +134,31 @@ def _parse_prom_metrics(text):
         url = labels.get('monitor_url')
         key_url = f"url:{url.rstrip('/')}" if url else None
         key_name = f"name:{name.lower()}" if name else None
-        entry_key = key_url or key_name or ('id:' + labels.get('monitor_id', ''))
+        entry_id = labels.get('monitor_id') or f"{len(monitors)}"
+        entry_key = key_url or key_name or ('id:' + entry_id)
         if entry_key not in monitors:
-            monitors[entry_key] = {'name': name, 'url': url}
+            monitors[entry_key] = {'name': name, 'url': url, 'monitor_id': entry_id}
         if metric == 'monitor_status':
             monitors[entry_key]['status_code'] = int(value)
-    return monitors
+
+    # Build a mapping that includes both url:<...> and name:<...> keys
+    mapped = {}
+    for entry in monitors.values():
+        name = entry.get('name')
+        url = entry.get('url')
+        mid = entry.get('monitor_id')
+        # canonicalize
+        if url:
+            mapped_key = 'url:' + url.rstrip('/')
+            mapped[mapped_key] = entry
+        if name:
+            mapped_key = 'name:' + name.lower()
+            mapped[mapped_key] = entry
+        # also expose by id
+        if mid:
+            mapped_key = 'id:' + str(mid)
+            mapped[mapped_key] = entry
+    return mapped
 
 
 def fetch_kuma_metrics():
