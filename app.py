@@ -233,6 +233,7 @@ def api_services():
     services = load_services()
     # try to fetch uptime kuma metrics (optional)
     kuma = fetch_kuma_metrics()
+    matched_monitors = set()
     for s in services:
         s['status'] = get_status(s)
         # enrich with uptime kuma info when possible
@@ -241,21 +242,58 @@ def api_services():
             s_name = s.get('name')
             # try match by url first, then by name
             monitor = None
+            monitor_key = None
             if s_url:
-                monitor = kuma.get('url:' + s_url.rstrip('/'))
+                key = 'url:' + s_url.rstrip('/')
+                monitor = kuma.get(key)
+                monitor_key = key
             if not monitor and s_name:
-                monitor = kuma.get('name:' + s_name.lower())
+                key = 'name:' + s_name.lower()
+                monitor = kuma.get(key)
+                monitor_key = key
             if monitor and isinstance(monitor, dict):
+                # record matched monitor to avoid duplicates later
+                m_name = (monitor.get('name') or '').lower()
+                m_url = (monitor.get('url') or '').rstrip('/')
+                matched_monitors.add((m_name, m_url))
                 # we only care about the status code from Kuma metrics
                 status_code = monitor.get('status_code')
                 if status_code is not None:
-                    s['uptime'] = {'code': status_code, 'label': {1:'UP',0:'DOWN',2:'PENDING',3:'MAINTENANCE'}.get(status_code, 'UNKNOWN')}
+                    s['uptime'] = {'code': status_code, 'label': {1: 'UP', 0: 'DOWN', 2: 'PENDING', 3: 'MAINTENANCE'}.get(status_code, 'UNKNOWN')}
                 else:
                     s['uptime'] = None
             else:
                 s['uptime'] = None
         except Exception:
             s['uptime'] = None
+    # Append Kuma-only monitors (those not matched to any service)
+    # Build a set of unique monitors from kuma mapping
+    seen = set()
+    for entry in kuma.values():
+        if not isinstance(entry, dict):
+            continue
+        name = (entry.get('name') or '').lower()
+        url = (entry.get('url') or '').rstrip('/')
+        key = (name, url)
+        if key in matched_monitors or key in seen:
+            seen.add(key)
+            continue
+        seen.add(key)
+        # create lightweight kuma-only card
+        status_code = entry.get('status_code')
+        uptime = None
+        if status_code is not None:
+            uptime = {'code': status_code, 'label': {1: 'UP', 0: 'DOWN', 2: 'PENDING', 3: 'MAINTENANCE'}.get(status_code, 'UNKNOWN')}
+        kuma_item = {
+            'name': entry.get('name') or f'kuma-{entry.get("monitor_id","")}',
+            'icon': None,
+            'url': entry.get('url'),
+            'status': 'unknown',
+            'uptime': uptime,
+            'kuma_only': True,
+        }
+        services.append(kuma_item)
+
     return jsonify(services)
 
 
