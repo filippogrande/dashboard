@@ -11,13 +11,16 @@ async function fetchServices(){
   return res.json()
 }
 
-function statusBadge(status){
+function statusBadge(status, color){
   const span = document.createElement('span')
   span.className = 'text-sm text-slate-500 flex items-center'
   const dot = document.createElement('span')
   dot.className = 'status-dot'
-  if (status === 'running') dot.style.background = '#16a34a'
-  else if (status === 'stopped') dot.style.background = '#ef4444'
+  // prefer explicit color if provided (from Kuma), otherwise derive from status
+  if (color){
+    dot.style.background = color
+  } else if (status === 'running' || status === 'up') dot.style.background = '#16a34a'
+  else if (status === 'stopped' || status === 'down') dot.style.background = '#ef4444'
   else if (status === 'missing') dot.style.background = '#9ca3af'
   else dot.style.background = '#6366f1'
   const txt = document.createElement('span')
@@ -58,7 +61,10 @@ function render(services){
     const name = document.createElement('div')
     name.className = 'font-medium text-slate-900'
     name.textContent = s.name
-    const statusEl = statusBadge(s.status)
+    // Prefer uptime/Kuma status/color when available so UI reflects monitoring
+    const badgeStatus = s.kuma_status || s.status || 'unknown'
+    const badgeColor = s.kuma_color || null
+    const statusEl = statusBadge(badgeStatus, badgeColor)
     meta.appendChild(name)
     meta.appendChild(statusEl)
 
