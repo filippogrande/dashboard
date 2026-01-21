@@ -16,10 +16,19 @@ import logging
 
 load_dotenv()
 
-# Configure logging (default DEBUG so logs are visible without extra env)
-LOG_LEVEL = os.environ.get('LOG_LEVEL', 'DEBUG').upper()
+# Configure logging: default INFO to reduce noise; enable debug via env
+LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
 logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
+# Dedicated logger for matching diagnostics; can be enabled with MATCH_DEBUG=1
+matching_logger = logging.getLogger('hs.match')
+if os.environ.get('MATCH_DEBUG') == '1':
+    matching_logger.setLevel(logging.DEBUG)
+else:
+    matching_logger.setLevel(logging.INFO)
+# Reduce chatter from HTTP libraries
+logging.getLogger('requests').setLevel(logging.WARNING)
+logging.getLogger('urllib3').setLevel(logging.WARNING)
 
 APP_ROOT = Path(__file__).parent
 # If SERVICE_ROOT is set (mounted host folder), use it as source of services.json, images and compose files
@@ -315,8 +324,8 @@ def api_services():
     matched_monitors = set()
     logger.info('Loaded %d services; kuma monitors=%d', len(services), len(kuma))
     for s in services:
-        s['status'] = get_status(s)
-        logger.debug('Service %s status=%s', s.get('name'), s['status'])
+        s['status'] = get_status(s, kuma)
+        logger.info('Service %s status=%s', s.get('name'), s['status'])
         # default kuma_status/color derived from local status so UI shows meaningful badge
         if s['status'] == 'running':
             s['kuma_status'] = 'up'
@@ -334,7 +343,7 @@ def api_services():
         try:
             s_url = s.get('url')
             s_name = s.get('name')
-            logger.debug('Matching service name=%s url=%s against kuma keys', s_name, s_url)
+            matching_logger.debug('Matching service name=%s url=%s against kuma keys', s_name, s_url)
             # try match by url first, then by name
             monitor = None
             monitor_key = None
@@ -342,12 +351,12 @@ def api_services():
                 key = 'url:' + s_url.rstrip('/')
                 monitor = kuma.get(key)
                 monitor_key = key
-                logger.debug('Tried key %s -> %s', key, 'found' if monitor else 'not found')
+                matching_logger.debug('Tried key %s -> %s', key, 'found' if monitor else 'not found')
             if not monitor and s_name:
                 key = 'name:' + s_name.lower()
                 monitor = kuma.get(key)
                 monitor_key = key
-                logger.debug('Tried key %s -> %s', key, 'found' if monitor else 'not found')
+                matching_logger.debug('Tried key %s -> %s', key, 'found' if monitor else 'not found')
             if monitor and isinstance(monitor, dict):
                 # record matched monitor to avoid duplicates later
                 m_name = (monitor.get('name') or '').lower()

@@ -74,7 +74,8 @@ function render(services){
     const right = document.createElement('div')
     right.className = 'flex items-center gap-2'
 
-    if (s.controls !== false){
+    // don't show controls for kuma-only monitors
+    if (s.controls !== false && !s.kuma_only){
       const start = document.createElement('button')
       start.className = 'px-3 py-1 bg-emerald-600 text-white rounded-md text-sm shadow-sm'
       start.textContent = 'Avvia'
