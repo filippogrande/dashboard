@@ -388,8 +388,18 @@ def api_services():
     for entry in kuma.values():
         if not isinstance(entry, dict):
             continue
-        name = (entry.get('name') or '').lower()
-        url = (entry.get('url') or '').rstrip('/')
+        name_raw = entry.get('name')
+        name = (name_raw or '').lower()
+        url_raw = entry.get('url')
+        url = (url_raw or '')
+        # skip monitors with no useful identity
+        if not name and not url:
+            continue
+        # exclude internal/placeholder Kuma monitors like 'kuma-' entries
+        if name.startswith('kuma-'):
+            continue
+        # normalize url for comparison
+        url = url.rstrip('/')
         key = (name, url)
         if key in matched_monitors or key in seen:
             seen.add(key)
