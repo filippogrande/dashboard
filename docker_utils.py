@@ -4,7 +4,7 @@ import logging
 import requests
 import urllib.parse
 
-from .kuma import find_kuma_monitor_for_service
+from kuma import find_kuma_monitor_for_service
 
 logger = logging.getLogger(__name__)
 

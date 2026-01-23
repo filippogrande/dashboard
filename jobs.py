@@ -5,7 +5,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 import logging
 
-from .docker_utils import run_compose
+from docker_utils import run_compose
 
 logger = logging.getLogger(__name__)
 
