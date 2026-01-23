@@ -19,19 +19,25 @@ def docker_cli_available():
 def run_compose(compose_path, action):
     if not compose_path.exists():
         return False, 'compose file not found'
+    # Use the modern `docker compose` invocation (separate token 'compose')
     if action == 'up':
         cmd = ['docker', 'compose', '-f', str(compose_path), 'up', '-d']
     else:
         cmd = ['docker', 'compose', '-f', str(compose_path), 'down']
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-        return p.returncode == 0, (p.stdout or '') + (p.stderr or '')
+        out = (p.stdout or '') + (p.stderr or '')
+        if p.returncode == 0:
+            return True, out
+        return False, out
+    except FileNotFoundError as e:
+        msg = 'docker CLI not found in container; cannot run compose: ' + str(e)
+        logger.warning(msg)
+        return False, msg
     except Exception as e:
-        if isinstance(e, FileNotFoundError) or ('[Errno 2]' in str(e) and 'docker' in str(e)):
-            msg = 'docker CLI not found in container; cannot run compose'
-            logger.warning(msg + ': %s', e)
-            return False, msg + f': {e}'
-        return False, str(e)
+        msg = 'Error running compose command: ' + str(e)
+        logger.exception(msg)
+        return False, msg
 
 
 def get_status(service, kuma=None):

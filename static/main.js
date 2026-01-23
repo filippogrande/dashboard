@@ -183,4 +183,4 @@ function initTheme(){
 
 initTheme()
 refresh()
-setInterval(refresh, 10000)
+setInterval(refresh, 30000)
