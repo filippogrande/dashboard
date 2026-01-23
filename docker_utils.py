@@ -25,8 +25,13 @@ def run_compose(compose_path, action):
     else:
         cmd = ['docker', 'compose', '-f', str(compose_path), 'down']
     try:
+        logger.info('Running compose command: %s', ' '.join(cmd))
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
         out = (p.stdout or '') + (p.stderr or '')
+        logger.info('Compose command finished: returncode=%s', p.returncode)
+        # log full stdout/stderr at debug level
+        logger.debug('Compose stdout: %s', p.stdout)
+        logger.debug('Compose stderr: %s', p.stderr)
         if p.returncode == 0:
             return True, out
         return False, out
