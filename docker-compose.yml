@@ -22,4 +22,8 @@ services:
     volumes:
       # mount a host folder that contains services.json, images/ and compose files
       - ./data:/srv/services:rw
+      # mount docker socket so the container can talk to the host Docker daemon
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # optionally expose host docker binary into the container (works if host and image glibc/libs compatible)
+      - /usr/bin/docker:/usr/bin/docker:ro
     restart: unless-stopped

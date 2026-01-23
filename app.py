@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 import requests
 
 import re
+import urllib.parse
 import time
 import logging
 import sqlite3
@@ -76,6 +77,13 @@ def _db_connect():
     conn = sqlite3.connect(str(DB_FILE), timeout=30)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def docker_cli_available():
+    try:
+        return shutil.which('docker') is not None
+    except Exception:
+        return False
 
 def db_init():
     conn = _db_connect()
@@ -226,12 +234,27 @@ def _parse_prom_metrics(text):
             continue
         name = labels.get('monitor_name')
         url = labels.get('monitor_url')
-        key_url = f"url:{url.rstrip('/')}" if url else None
+        # normalize URL for matching: keep scheme://netloc or host:port
+        def _norm_url(u):
+            if not u:
+                return None
+            try:
+                p = urllib.parse.urlparse(u)
+                if p.netloc:
+                    # keep scheme and netloc
+                    return (p.scheme + '://' + p.netloc).rstrip('/')
+                # no scheme, strip path
+                return u.split('/')[0].rstrip('/')
+            except Exception:
+                return u.rstrip('/')
+
+        norm_url = _norm_url(url)
+        key_url = f"url:{norm_url}" if norm_url else None
         key_name = f"name:{name.lower()}" if name else None
         entry_id = labels.get('monitor_id') or f"{len(monitors)}"
         entry_key = key_url or key_name or ('id:' + entry_id)
         if entry_key not in monitors:
-            monitors[entry_key] = {'name': name, 'url': url, 'monitor_id': entry_id}
+            monitors[entry_key] = {'name': name, 'url': url, 'norm_url': norm_url, 'monitor_id': entry_id}
         if metric == 'monitor_status':
             monitors[entry_key]['status_code'] = int(value)
 
@@ -240,10 +263,11 @@ def _parse_prom_metrics(text):
     for entry in monitors.values():
         name = entry.get('name')
         url = entry.get('url')
+        norm = entry.get('norm_url')
         mid = entry.get('monitor_id')
         # canonicalize
-        if url:
-            mapped_key = 'url:' + url.rstrip('/')
+        if norm:
+            mapped_key = 'url:' + norm
             mapped[mapped_key] = entry
         if name:
             mapped_key = 'name:' + name.lower()
@@ -290,7 +314,16 @@ def find_kuma_monitor_for_service(service, kuma):
     s_url = service.get('url')
     s_name = service.get('name')
     if s_url:
-        key = 'url:' + s_url.rstrip('/')
+        # normalize service url similar to how Kuma URLs are normalized
+        try:
+            p = urllib.parse.urlparse(s_url)
+            if p.netloc:
+                key_url = p.scheme + '://' + p.netloc
+            else:
+                key_url = s_url.split('/')[0]
+        except Exception:
+            key_url = s_url.rstrip('/')
+        key = 'url:' + key_url.rstrip('/')
         m = kuma.get(key)
         if m:
             return m
@@ -385,6 +418,11 @@ def run_compose(compose_path, action):
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
         return p.returncode == 0, (p.stdout or '') + (p.stderr or '')
     except Exception as e:
+        # provide clearer message for missing docker binary
+        if isinstance(e, FileNotFoundError) or ('[Errno 2]' in str(e) and 'docker' in str(e)):
+            msg = 'docker CLI not found in container; cannot run compose'
+            logger.warning(msg + ': %s', e)
+            return False, msg + f': {e}'
         return False, str(e)
 
 
@@ -523,6 +561,8 @@ def api_start():
     svc = next((s for s in services if s.get('name') == name or s.get('id') == name), None)
     if not svc:
         return jsonify({'ok': False, 'error': 'service not found'}), 404
+    if not docker_cli_available():
+        return jsonify({'ok': False, 'error': 'docker CLI not found in container; cannot run compose. Mount /var/run/docker.sock and install docker client, or run dashboard on host with docker available.'}), 500
     path = compose_path_for(svc)
     job_id = submit_job('start', name, path)
     return jsonify({'ok': True, 'job_id': job_id})
@@ -536,6 +576,8 @@ def api_stop():
     svc = next((s for s in services if s.get('name') == name or s.get('id') == name), None)
     if not svc:
         return jsonify({'ok': False, 'error': 'service not found'}), 404
+    if not docker_cli_available():
+        return jsonify({'ok': False, 'error': 'docker CLI not found in container; cannot run compose. Mount /var/run/docker.sock and install docker client, or run dashboard on host with docker available.'}), 500
     path = compose_path_for(svc)
     job_id = submit_job('stop', name, path)
     return jsonify({'ok': True, 'job_id': job_id})
@@ -544,6 +586,8 @@ def api_stop():
 @app.route('/api/start_all', methods=['POST'])
 def api_start_all():
     services = load_services()
+    if not docker_cli_available():
+        return jsonify({'ok': False, 'error': 'docker CLI not found in container; cannot run compose.'}), 500
     job_ids = []
     for s in services:
         path = compose_path_for(s)
@@ -555,6 +599,8 @@ def api_start_all():
 @app.route('/api/stop_all', methods=['POST'])
 def api_stop_all():
     services = load_services()
+    if not docker_cli_available():
+        return jsonify({'ok': False, 'error': 'docker CLI not found in container; cannot run compose.'}), 500
     job_ids = []
     for s in services:
         path = compose_path_for(s)
