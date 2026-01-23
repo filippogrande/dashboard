@@ -375,11 +375,13 @@ def get_status(service, kuma=None):
     try:
         p = subprocess.run(['docker', 'compose', '-f', str(compose_path), 'ps'], capture_output=True, text=True, timeout=30)
         out = (p.stdout or '') + (p.stderr or '')
-        if 'Up' in out:
+        # look for common indicators that the service is running
+        lowered = out.lower()
+        if any(tok in lowered for tok in ('up', 'running', 'healthy', 'started')):
             return 'running'
-        if p.returncode != 0:
-            return 'stopped'
-        return 'stopped'
+        # if docker command didn't report running, don't assume stopped yet
+        # fall back to Kuma or HTTP probe below
+        logger.debug('docker compose ps output did not indicate running for %s: %s', service.get('name'), out[:200])
     except FileNotFoundError:
         logger.warning('docker CLI not found; falling back to Kuma/HTTP probe for %s', service.get('name'))
         # try match with Kuma if provided
