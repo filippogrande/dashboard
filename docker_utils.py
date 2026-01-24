@@ -1,17 +1,9 @@
-import shutil
-import subprocess
-import logging
-import requests
-import urllib.parse
-
-from kuma import find_kuma_monitor_for_service
 import os
 import shutil
 import subprocess
 import logging
 import requests
 import urllib.parse
-import yaml
 
 from kuma import find_kuma_monitor_for_service
 
@@ -111,10 +103,18 @@ def run_compose(compose_path, action):
             # parse compose file to get service names if possible
             services = set()
             try:
-                with open(compose_path, 'r') as fh:
-                    doc = yaml.safe_load(fh)
-                    if isinstance(doc, dict):
-                        services = set(doc.get('services', {}).keys())
+                # import PyYAML only when needed; it's optional
+                try:
+                    import yaml as _yaml
+                except Exception:
+                    _yaml = None
+                if _yaml:
+                    with open(compose_path, 'r') as fh:
+                        doc = _yaml.safe_load(fh)
+                        if isinstance(doc, dict):
+                            services = set(doc.get('services', {}).keys())
+                else:
+                    services = set()
             except Exception:
                 services = set()
             client = docker.from_env()
