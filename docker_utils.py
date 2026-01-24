@@ -5,6 +5,15 @@ import requests
 import urllib.parse
 
 from kuma import find_kuma_monitor_for_service
+import os
+import shutil
+import subprocess
+import logging
+import requests
+import urllib.parse
+import yaml
+
+from kuma import find_kuma_monitor_for_service
 
 logger = logging.getLogger(__name__)
 
@@ -19,19 +28,17 @@ def docker_cli_available():
 def run_compose(compose_path, action):
     if not compose_path.exists():
         return False, 'compose file not found'
-    # Use the modern `docker compose` invocation (separate token 'compose')
-    # Try to use the compose project name derived from the compose file parent folder
+
+    # Determine candidate project names to try (dirname, common names, none)
     try:
         project_name = compose_path.parent.name
     except Exception:
         project_name = None
-    base = ['docker', 'compose']
+    project_candidates = []
     if project_name:
-        base = base + ['-p', project_name]
-    if action == 'up':
-        cmd = base + ['-f', str(compose_path), 'up', '-d']
-    else:
-        cmd = base + ['-f', str(compose_path), 'down']
+        project_candidates.append(project_name)
+    project_candidates.extend(['docker', 'services', None])
+
     def _run(cmd_to_run):
         logger.info('Running compose command: %s', ' '.join(cmd_to_run))
         p = subprocess.run(cmd_to_run, capture_output=True, text=True, timeout=180)
@@ -41,29 +48,41 @@ def run_compose(compose_path, action):
         logger.debug('Compose stderr: %s', p.stderr)
         return p.returncode, out
 
-    # Try primary form
-    try:
-        rc, out = _run(cmd)
-        if rc == 0:
-            return True, out
-    except FileNotFoundError as e:
-        logger.warning('docker CLI not found: %s', e)
-        # fall through to try docker-compose if available
-        rc = None
-        out = str(e)
-    except Exception as e:
-        logger.exception('Error running compose command: %s', e)
-        rc = None
-        out = str(e)
+    # Try primary candidates with `docker compose`
+    rc = None
+    out = ''
+    for proj in project_candidates:
+        base = ['docker', 'compose']
+        if proj:
+            base = base + ['-p', proj]
+        if action == 'up':
+            cmd = base + ['-f', str(compose_path), 'up', '-d']
+        else:
+            cmd = base + ['-f', str(compose_path), 'down']
+        try:
+            rc, out = _run(cmd)
+            if rc == 0:
+                return True, out
+        except FileNotFoundError as e:
+            logger.warning('docker CLI not found: %s', e)
+            rc = None
+            out = str(e)
+            break
+        except Exception as e:
+            logger.exception('Error running compose command: %s', e)
+            rc = None
+            out = str(e)
 
-    # If primary failed, try alternative forms to be resilient against different docker binaries
-    # 1) long option `--file`
+    # Try alternative forms: `docker compose --file` with same project candidates, then legacy `docker-compose`
     alt_cmds = []
-    if action == 'up':
-        alt_cmds.append(['docker', 'compose', '--file', str(compose_path), 'up', '-d'])
-    else:
-        alt_cmds.append(['docker', 'compose', '--file', str(compose_path), 'down'])
-    # 2) legacy docker-compose
+    for proj in project_candidates:
+        base = ['docker', 'compose']
+        if proj:
+            base = base + ['-p', proj]
+        if action == 'up':
+            alt_cmds.append(base + ['--file', str(compose_path), 'up', '-d'])
+        else:
+            alt_cmds.append(base + ['--file', str(compose_path), 'down'])
     if action == 'up':
         alt_cmds.append(['docker-compose', '-f', str(compose_path), 'up', '-d'])
     else:
@@ -75,7 +94,6 @@ def run_compose(compose_path, action):
             if rc2 == 0:
                 logger.info('Compose succeeded with fallback: %s', ' '.join(alt))
                 return True, out2
-            # if stderr mentions unknown shorthand flag for -f, keep trying
             if 'unknown shorthand flag' in (out2 or '').lower() or 'unknown flag' in (out2 or '').lower():
                 logger.warning('Compose fallback reported shorthand/unknown flag: %s', out2.splitlines()[:3])
             else:
@@ -85,27 +103,21 @@ def run_compose(compose_path, action):
         except Exception:
             logger.exception('Error running fallback compose command: %s', alt)
 
-    # If we got here, subprocess attempts failed. For `down` try Docker SDK fallback
+    # If subprocess attempts failed, for `down` try Docker SDK fallback (stop/remove containers by service label)
     if action == 'down':
         try:
             import docker
             logger.info('Attempting docker SDK fallback for compose down')
-            # parse compose file to get service names
+            # parse compose file to get service names if possible
+            services = set()
             try:
-                try:
-                    import yaml
-                except Exception:
-                    yaml = None
-                if yaml:
-                    with open(compose_path, 'r') as fh:
-                        doc = yaml.safe_load(fh)
-                        services = set(doc.get('services', {}).keys() if isinstance(doc, dict) else [])
-                else:
-                    services = set()
+                with open(compose_path, 'r') as fh:
+                    doc = yaml.safe_load(fh)
+                    if isinstance(doc, dict):
+                        services = set(doc.get('services', {}).keys())
             except Exception:
                 services = set()
             client = docker.from_env()
-            stopped = []
             removed = []
             for c in client.containers.list(all=True):
                 labels = c.labels or {}
@@ -123,7 +135,6 @@ def run_compose(compose_path, action):
         except Exception as e:
             logger.debug('Docker SDK fallback not available or failed: %s', e)
 
-    # All attempts failed
     msg = 'All compose invocation attempts failed. Last output: ' + (out or '')
     return False, msg
 
@@ -136,17 +147,34 @@ def get_status(service, kuma=None):
         compose_path = None
     # If no compose path, skip docker check
     if compose_path:
+        # Try ps with project candidates (same logic as run_compose)
         try:
-            p = subprocess.run(['docker', 'compose', '-f', str(compose_path), 'ps'], capture_output=True, text=True, timeout=30)
-            out = (p.stdout or '') + (p.stderr or '')
-            lowered = out.lower()
-            if any(tok in lowered for tok in ('up', 'running', 'healthy', 'started')):
-                return 'running'
-            logger.debug('docker compose ps output did not indicate running for %s: %s', service.get('name'), out[:200])
-        except FileNotFoundError:
-            logger.warning('docker CLI not found; continuing with Kuma/HTTP probe for %s', service.get('name'))
+            try:
+                project_name = compose_path.parent.name
+            except Exception:
+                project_name = None
+            project_candidates = []
+            if project_name:
+                project_candidates.append(project_name)
+            project_candidates.extend(['docker', 'services', None])
+            for proj in project_candidates:
+                base = ['docker', 'compose']
+                if proj:
+                    base = base + ['-p', proj]
+                cmd = base + ['-f', str(compose_path), 'ps']
+                try:
+                    p = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                    out = (p.stdout or '') + (p.stderr or '')
+                    lowered = out.lower()
+                    if any(tok in lowered for tok in ('up', 'running', 'healthy', 'started')):
+                        return 'running'
+                except FileNotFoundError:
+                    logger.warning('docker CLI not found; continuing with Kuma/HTTP probe for %s', service.get('name'))
+                    break
+                except Exception:
+                    logger.debug('docker compose ps failed for %s with project %s', service.get('name'), proj)
         except Exception:
-            logger.exception('Error running docker compose ps for %s; continuing with Kuma/HTTP probe', service.get('name'))
+            logger.exception('Error preparing docker compose ps for %s; continuing with Kuma/HTTP probe', service.get('name'))
 
     # Try Kuma
     try:
