@@ -20,10 +20,18 @@ def run_compose(compose_path, action):
     if not compose_path.exists():
         return False, 'compose file not found'
     # Use the modern `docker compose` invocation (separate token 'compose')
+    # Try to use the compose project name derived from the compose file parent folder
+    try:
+        project_name = compose_path.parent.name
+    except Exception:
+        project_name = None
+    base = ['docker', 'compose']
+    if project_name:
+        base = base + ['-p', project_name]
     if action == 'up':
-        cmd = ['docker', 'compose', '-f', str(compose_path), 'up', '-d']
+        cmd = base + ['-f', str(compose_path), 'up', '-d']
     else:
-        cmd = ['docker', 'compose', '-f', str(compose_path), 'down']
+        cmd = base + ['-f', str(compose_path), 'down']
     def _run(cmd_to_run):
         logger.info('Running compose command: %s', ' '.join(cmd_to_run))
         p = subprocess.run(cmd_to_run, capture_output=True, text=True, timeout=180)
@@ -76,6 +84,44 @@ def run_compose(compose_path, action):
             logger.debug('Fallback command not found: %s', alt[0])
         except Exception:
             logger.exception('Error running fallback compose command: %s', alt)
+
+    # If we got here, subprocess attempts failed. For `down` try Docker SDK fallback
+    if action == 'down':
+        try:
+            import docker
+            logger.info('Attempting docker SDK fallback for compose down')
+            # parse compose file to get service names
+            try:
+                try:
+                    import yaml
+                except Exception:
+                    yaml = None
+                if yaml:
+                    with open(compose_path, 'r') as fh:
+                        doc = yaml.safe_load(fh)
+                        services = set(doc.get('services', {}).keys() if isinstance(doc, dict) else [])
+                else:
+                    services = set()
+            except Exception:
+                services = set()
+            client = docker.from_env()
+            stopped = []
+            removed = []
+            for c in client.containers.list(all=True):
+                labels = c.labels or {}
+                svc = labels.get('com.docker.compose.service')
+                if svc and (not services or svc in services):
+                    try:
+                        if c.status == 'running':
+                            c.stop(timeout=10)
+                        c.remove(v=True, force=True)
+                        removed.append(c.name)
+                    except Exception:
+                        logger.exception('Error stopping/removing container %s', c.name)
+            msg = f'docker SDK fallback removed containers: {removed}'
+            return True, msg
+        except Exception as e:
+            logger.debug('Docker SDK fallback not available or failed: %s', e)
 
     # All attempts failed
     msg = 'All compose invocation attempts failed. Last output: ' + (out or '')

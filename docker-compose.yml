@@ -26,4 +26,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       # optionally expose host docker binary into the container (works if host and image glibc/libs compatible)
       - /usr/bin/docker:/usr/bin/docker:ro
+      # Mount host docker CLI plugins so `docker compose` works inside the container
+      - /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro
+      - /usr/local/lib/docker/cli-plugins:/usr/local/lib/docker/cli-plugins:ro
     restart: unless-stopped
