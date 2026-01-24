@@ -54,6 +54,25 @@ def run_compose(compose_path, action, svc_name=None):
         try:
             rc, out = _run(cmd)
             if rc == 0:
+                # After a successful compose down, ensure containers with the service label are removed
+                if action == 'down' and svc_name:
+                    try:
+                        p2 = subprocess.run(['docker', 'ps', '-a', '--filter', f'label=com.docker.compose.service={svc_name}', '--format', '{{.ID}}'], capture_output=True, text=True, timeout=30)
+                        ids = [ln.strip() for ln in (p2.stdout or '').splitlines() if ln.strip()]
+                        if ids:
+                            removed = []
+                            for cid in ids:
+                                try:
+                                    subprocess.run(['docker', 'stop', cid], capture_output=True, text=True, timeout=60)
+                                    subprocess.run(['docker', 'rm', '-f', cid], capture_output=True, text=True, timeout=60)
+                                    removed.append(cid)
+                                except Exception:
+                                    logger.exception('Error stopping/removing container %s after compose down', cid)
+                            if removed:
+                                msg = f'Compose down finished; additionally removed containers by label: {removed}'
+                                out = (out or '') + '\n' + msg
+                    except Exception:
+                        logger.debug('Post-down label cleanup failed for %s', svc_name)
                 return True, out
         except FileNotFoundError as e:
             logger.warning('docker CLI not found: %s', e)
@@ -85,6 +104,25 @@ def run_compose(compose_path, action, svc_name=None):
             rc2, out2 = _run(alt)
             if rc2 == 0:
                 logger.info('Compose succeeded with fallback: %s', ' '.join(alt))
+                # Also attempt label cleanup after a successful down
+                if action == 'down' and svc_name:
+                    try:
+                        p2 = subprocess.run(['docker', 'ps', '-a', '--filter', f'label=com.docker.compose.service={svc_name}', '--format', '{{.ID}}'], capture_output=True, text=True, timeout=30)
+                        ids = [ln.strip() for ln in (p2.stdout or '').splitlines() if ln.strip()]
+                        if ids:
+                            removed = []
+                            for cid in ids:
+                                try:
+                                    subprocess.run(['docker', 'stop', cid], capture_output=True, text=True, timeout=60)
+                                    subprocess.run(['docker', 'rm', '-f', cid], capture_output=True, text=True, timeout=60)
+                                    removed.append(cid)
+                                except Exception:
+                                    logger.exception('Error stopping/removing container %s after compose fallback', cid)
+                            if removed:
+                                msg = f'Fallback compose finished; additionally removed containers by label: {removed}'
+                                out2 = (out2 or '') + '\n' + msg
+                    except Exception:
+                        logger.debug('Post-down label cleanup failed for %s', svc_name)
                 return True, out2
             if 'unknown shorthand flag' in (out2 or '').lower() or 'unknown flag' in (out2 or '').lower():
                 logger.warning('Compose fallback reported shorthand/unknown flag: %s', out2.splitlines()[:3])
