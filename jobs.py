@@ -113,7 +113,7 @@ def submit_job(action, svc_name, compose_path):
         except Exception:
             logger.exception('Failed to update job start in DB')
 
-        ok, out = run_compose(compose_path, 'up' if action == 'start' else 'down')
+        ok, out = run_compose(compose_path, 'up' if action == 'start' else 'down', svc_name)
         finish_ts = time.time()
         final_status = 'done' if ok else 'failed'
         with JOB_LOCK:

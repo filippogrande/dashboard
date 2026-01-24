@@ -17,7 +17,7 @@ def docker_cli_available():
         return False
 
 
-def run_compose(compose_path, action):
+def run_compose(compose_path, action, svc_name=None):
     if not compose_path.exists():
         return False, 'compose file not found'
 
@@ -95,8 +95,31 @@ def run_compose(compose_path, action):
         except Exception:
             logger.exception('Error running fallback compose command: %s', alt)
 
-    # If subprocess attempts failed, for `down` try Docker SDK fallback (stop/remove containers by service label)
+    # If subprocess attempts failed, for `down` try a CLI label-based fallback
+    # This avoids needing the compose file path to exist inside the container.
     if action == 'down':
+        # First attempt: CLI fallback using container labels
+        if svc_name:
+            try:
+                logger.info('Attempting CLI label-based fallback for compose down for service %s', svc_name)
+                p = subprocess.run(['docker', 'ps', '-a', '--filter', f'label=com.docker.compose.service={svc_name}', '--format', '{{.ID}}'], capture_output=True, text=True, timeout=30)
+                ids = [ln.strip() for ln in (p.stdout or '').splitlines() if ln.strip()]
+                if ids:
+                    removed = []
+                    for cid in ids:
+                        try:
+                            subprocess.run(['docker', 'stop', cid], capture_output=True, text=True, timeout=60)
+                            subprocess.run(['docker', 'rm', '-f', cid], capture_output=True, text=True, timeout=60)
+                            removed.append(cid)
+                        except Exception:
+                            logger.exception('Error stopping/removing container %s via CLI fallback', cid)
+                    msg = f'CLI label fallback removed containers: {removed}'
+                    logger.info(msg)
+                    return True, msg
+            except Exception as e:
+                logger.debug('CLI label fallback failed: %s', e)
+
+        # If CLI label fallback didn't run or didn't find containers, try Docker SDK fallback (stop/remove containers by service label)
         try:
             import docker
             logger.info('Attempting docker SDK fallback for compose down')
