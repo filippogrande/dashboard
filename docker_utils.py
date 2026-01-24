@@ -24,25 +24,62 @@ def run_compose(compose_path, action):
         cmd = ['docker', 'compose', '-f', str(compose_path), 'up', '-d']
     else:
         cmd = ['docker', 'compose', '-f', str(compose_path), 'down']
-    try:
-        logger.info('Running compose command: %s', ' '.join(cmd))
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    def _run(cmd_to_run):
+        logger.info('Running compose command: %s', ' '.join(cmd_to_run))
+        p = subprocess.run(cmd_to_run, capture_output=True, text=True, timeout=180)
         out = (p.stdout or '') + (p.stderr or '')
         logger.info('Compose command finished: returncode=%s', p.returncode)
-        # log full stdout/stderr at debug level
         logger.debug('Compose stdout: %s', p.stdout)
         logger.debug('Compose stderr: %s', p.stderr)
-        if p.returncode == 0:
+        return p.returncode, out
+
+    # Try primary form
+    try:
+        rc, out = _run(cmd)
+        if rc == 0:
             return True, out
-        return False, out
     except FileNotFoundError as e:
-        msg = 'docker CLI not found in container; cannot run compose: ' + str(e)
-        logger.warning(msg)
-        return False, msg
+        logger.warning('docker CLI not found: %s', e)
+        # fall through to try docker-compose if available
+        rc = None
+        out = str(e)
     except Exception as e:
-        msg = 'Error running compose command: ' + str(e)
-        logger.exception(msg)
-        return False, msg
+        logger.exception('Error running compose command: %s', e)
+        rc = None
+        out = str(e)
+
+    # If primary failed, try alternative forms to be resilient against different docker binaries
+    # 1) long option `--file`
+    alt_cmds = []
+    if action == 'up':
+        alt_cmds.append(['docker', 'compose', '--file', str(compose_path), 'up', '-d'])
+    else:
+        alt_cmds.append(['docker', 'compose', '--file', str(compose_path), 'down'])
+    # 2) legacy docker-compose
+    if action == 'up':
+        alt_cmds.append(['docker-compose', '-f', str(compose_path), 'up', '-d'])
+    else:
+        alt_cmds.append(['docker-compose', '-f', str(compose_path), 'down'])
+
+    for alt in alt_cmds:
+        try:
+            rc2, out2 = _run(alt)
+            if rc2 == 0:
+                logger.info('Compose succeeded with fallback: %s', ' '.join(alt))
+                return True, out2
+            # if stderr mentions unknown shorthand flag for -f, keep trying
+            if 'unknown shorthand flag' in (out2 or '').lower() or 'unknown flag' in (out2 or '').lower():
+                logger.warning('Compose fallback reported shorthand/unknown flag: %s', out2.splitlines()[:3])
+            else:
+                logger.info('Compose fallback returned non-zero: %s', rc2)
+        except FileNotFoundError:
+            logger.debug('Fallback command not found: %s', alt[0])
+        except Exception:
+            logger.exception('Error running fallback compose command: %s', alt)
+
+    # All attempts failed
+    msg = 'All compose invocation attempts failed. Last output: ' + (out or '')
+    return False, msg
 
 
 def get_status(service, kuma=None):
