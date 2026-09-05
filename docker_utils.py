@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import logging
 import time
+from pathlib import Path
 
 from kuma import find_kuma_monitor_for_service
 
@@ -16,10 +17,18 @@ def docker_cli_available():
         return False
 
 
+def _to_path(compose_path):
+    """Convert string to Path if needed."""
+    if isinstance(compose_path, str):
+        return Path(compose_path)
+    return compose_path
+
+
 def detect_project_name(compose_path):
     """Detect docker compose project name from compose file parent directory."""
     try:
-        name = compose_path.parent.name
+        path = _to_path(compose_path)
+        name = path.parent.name
         if name and name not in ('.', '/'):
             return name
     except Exception:
@@ -84,7 +93,8 @@ def verify_containers_down(compose_path, project_name=None):
     
     # If compose ps fails, check via docker ps with label filter
     if rc != 0:
-        cmd2 = ['docker', 'ps', '-a', '--filter', f'compose-project={project_name or compose_path.parent.name}', '--format', '{{.Names}}']
+        path = _to_path(compose_path)
+        cmd2 = ['docker', 'ps', '-a', '--filter', f'compose-project={project_name or path.parent.name}', '--format', '{{.Names}}']
         rc2, out2 = _run(cmd2, timeout=15)
         if rc2 == 0 and not out2.strip():
             return True, 'No containers found (verified via docker ps)'
@@ -102,16 +112,17 @@ def run_compose(compose_path, action, svc_name=None):
     
     Returns (ok: bool, message: str).
     """
-    if not compose_path.exists():
+    path = _to_path(compose_path)
+    if not path.exists():
         return False, 'compose file not found'
     
-    project_name = detect_project_name(compose_path)
+    project_name = detect_project_name(path)
     
     # Build command
     cmd = ['docker', 'compose']
     if project_name:
         cmd = cmd + ['-p', project_name]
-    cmd = cmd + ['-f', str(compose_path)]
+    cmd = cmd + ['-f', str(path)]
     if action == 'up':
         cmd = cmd + ['up', '-d']
     elif action == 'down':
@@ -125,11 +136,11 @@ def run_compose(compose_path, action, svc_name=None):
         # Verify post-action
         time.sleep(2)  # brief grace period
         if action == 'up':
-            ok, msg = verify_containers_running(compose_path, project_name)
+            ok, msg = verify_containers_running(path, project_name)
             if not ok:
                 return False, f'Compose up succeeded but verification failed: {msg}\nOutput: {out}'
         elif action == 'down':
-            ok, msg = verify_containers_down(compose_path, project_name)
+            ok, msg = verify_containers_down(path, project_name)
             if not ok:
                 # Try force remove via labels as fallback
                 if svc_name:
@@ -142,7 +153,7 @@ def run_compose(compose_path, action, svc_name=None):
                                 _run(['docker', 'stop', cid], timeout=30)
                                 _run(['docker', 'rm', '-f', cid], timeout=30)
                             # Verify again
-                            ok2, msg2 = verify_containers_down(compose_path, project_name)
+                            ok2, msg2 = verify_containers_down(path, project_name)
                             if ok2:
                                 return True, f'Containers removed via fallback cleanup. Original: {out}'
                             return False, f'Containers still present after cleanup: {msg2}'
@@ -153,7 +164,7 @@ def run_compose(compose_path, action, svc_name=None):
     
     # Compose failed — try with no project name
     if project_name:
-        cmd_no_proj = ['docker', 'compose', '-f', str(compose_path)]
+        cmd_no_proj = ['docker', 'compose', '-f', str(path)]
         if action == 'up':
             cmd_no_proj = cmd_no_proj + ['up', '-d']
         else:
@@ -162,11 +173,11 @@ def run_compose(compose_path, action, svc_name=None):
         if rc2 == 0:
             time.sleep(2)
             if action == 'up':
-                ok, msg = verify_containers_running(compose_path, None)
+                ok, msg = verify_containers_running(path, None)
                 if not ok:
                     return False, f'Compose up (no project) succeeded but verification failed: {msg}'
             elif action == 'down':
-                ok, msg = verify_containers_down(compose_path, None)
+                ok, msg = verify_containers_down(path, None)
                 if not ok and svc_name:
                     # Fallback label cleanup
                     try:
@@ -212,11 +223,12 @@ def get_status(service, kuma=None):
         pass
     
     if compose_path:
-        project_name = detect_project_name(compose_path)
+        path = _to_path(compose_path)
+        project_name = detect_project_name(path)
         base = ['docker', 'compose']
         if project_name:
             base = base + ['-p', project_name]
-        cmd = base + ['-f', str(compose_path), 'ps']
+        cmd = base + ['-f', str(path), 'ps']
         rc, out = _run(cmd, timeout=15)
         if rc == 0:
             lowered = out.lower()
