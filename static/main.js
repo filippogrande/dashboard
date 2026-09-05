@@ -1,4 +1,3 @@
-
 const iconMap = {
   home: '🏠',
   download: '⬇️',
@@ -16,7 +15,6 @@ function statusBadge(status, color){
   span.className = 'text-sm text-slate-500 flex items-center'
   const dot = document.createElement('span')
   dot.className = 'status-dot'
-  // prefer explicit color if provided (from Kuma), otherwise derive from status
   if (color){
     dot.style.background = color
   } else if (status === 'running' || status === 'up') dot.style.background = '#16a34a'
@@ -45,7 +43,6 @@ function render(services){
 
     const icWrap = document.createElement('div')
     icWrap.className = 'w-14 h-14 rounded-lg flex items-center justify-center text-2xl font-medium text-white overflow-hidden bg-gradient-to-br from-indigo-600 to-pink-500'
-    // if icon is an image filename, use it from /static/images
     if (s.icon && (s.icon.includes('.') )){
       const img = document.createElement('img')
       img.src = '/images/' + s.icon
@@ -61,7 +58,6 @@ function render(services){
     const name = document.createElement('div')
     name.className = 'font-medium text-slate-900'
     name.textContent = s.name
-    // Prefer uptime/Kuma status/color when available so UI reflects monitoring
     const badgeStatus = s.kuma_status || s.status || 'unknown'
     const badgeColor = s.kuma_color || null
     const statusEl = statusBadge(badgeStatus, badgeColor)
@@ -74,7 +70,6 @@ function render(services){
     const right = document.createElement('div')
     right.className = 'flex items-center gap-2'
 
-    // don't show controls for kuma-only monitors
     if (s.controls !== false && !s.kuma_only){
       const start = document.createElement('button')
       start.className = 'px-3 py-1 bg-emerald-600 text-white rounded-md text-sm shadow-sm'
@@ -134,7 +129,6 @@ async function runJobAndPoll(name, url, startBtn, stopBtn){
     if (result.ok){
       const job = result.job
       if (job.status === 'done'){
-        // successful
       } else {
         console.error('job failed', job)
         alert('Operazione fallita: ' + (job.result||''))
@@ -158,6 +152,9 @@ async function refresh(){
 
 document.getElementById('startAll').onclick = async () => { await fetch('/api/start_all', {method:'POST'}); await refresh() }
 document.getElementById('stopAll').onclick = async () => { await fetch('/api/stop_all', {method:'POST'}); await refresh() }
+
+// Refresh manuale
+document.getElementById('refreshBtn').onclick = async () => { await refresh() }
 
 // Theme toggle (persisted)
 function applyTheme(theme){
@@ -183,4 +180,3 @@ function initTheme(){
 
 initTheme()
 refresh()
-setInterval(refresh, 30000)
