@@ -106,8 +106,8 @@ def api_services():
     matched_monitors = set()
     logger.info('Loaded %d services; kuma monitors=%d', len(services), len(kuma))
     for s in services:
-        # Add compose path for get_status
-        s['__compose_path'] = compose_path_for(s)
+        # Add compose path as string (PosixPath is not JSON serializable)
+        s['__compose_path'] = str(compose_path_for(s))
         s['status'] = get_status(s, kuma)
         logger.info('Service %s status=%s', s.get('name'), s['status'])
         # default kuma_status/color derived from local status so UI shows meaningful badge
