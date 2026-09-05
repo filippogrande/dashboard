@@ -98,6 +98,13 @@ async function action(name, url){
   }catch(e){console.error(e); return {ok:false,error:e.message}}
 }
 
+async function actionRaw(url, body){
+  try{
+    const res = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body || {})})
+    return res.json()
+  }catch(e){console.error(e); return {ok:false,error:e.message}}
+}
+
 async function pollJob(job_id, interval=1000){
   while(true){
     try{
@@ -145,13 +152,45 @@ async function runJobAndPoll(name, url, startBtn, stopBtn){
   }
 }
 
+async function pollMultipleJobs(jobs){
+  const results = []
+  for (const j of jobs){
+    const r = await pollJob(j.job_id)
+    results.push({name: j.name, result: r})
+  }
+  return results
+}
+
+async function runAllWithConfirm(apiUrl, actionLabel){
+  const confirmMsg = actionLabel === 'start'
+    ? 'Sei sicuro di voler avviare TUTTI i servizi?'
+    : 'Sei sicuro di voler fermare TUTTI i servizi?'
+  if (!confirm(confirmMsg)) return
+  
+  try{
+    const res = await actionRaw(apiUrl)
+    if (!res || !res.jobs || res.jobs.length === 0){
+      alert('Nessun job creato')
+      return
+    }
+    // Poll all jobs
+    const results = await pollMultipleJobs(res.jobs)
+    const failed = results.filter(r => !r.result.ok || (r.result.job && r.result.job.status === 'failed'))
+    if (failed.length > 0){
+      const details = failed.map(f => `${f.name}: ${f.result.error || f.result.job?.result || 'fallito'}`).join('\n')
+      alert(`${failed.length} operazione/i fallita/i:\n${details}`)
+    }
+  }catch(e){console.error(e); alert('Errore: '+e.message)}
+  await refresh()
+}
+
 async function refresh(){
   const services = await fetchServices()
   render(services)
 }
 
-document.getElementById('startAll').onclick = async () => { await fetch('/api/start_all', {method:'POST'}); await refresh() }
-document.getElementById('stopAll').onclick = async () => { await fetch('/api/stop_all', {method:'POST'}); await refresh() }
+document.getElementById('startAll').onclick = async () => { await runAllWithConfirm('/api/start_all', 'start') }
+document.getElementById('stopAll').onclick = async () => { await runAllWithConfirm('/api/stop_all', 'stop') }
 
 // Refresh manuale
 document.getElementById('refreshBtn').onclick = async () => { await refresh() }
