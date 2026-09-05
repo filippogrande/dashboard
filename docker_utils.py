@@ -2,8 +2,7 @@ import os
 import shutil
 import subprocess
 import logging
-import requests
-import urllib.parse
+import time
 
 from kuma import find_kuma_monitor_for_service
 
@@ -17,227 +16,218 @@ def docker_cli_available():
         return False
 
 
+def detect_project_name(compose_path):
+    """Detect docker compose project name from compose file parent directory."""
+    try:
+        name = compose_path.parent.name
+        if name and name not in ('.', '/'):
+            return name
+    except Exception:
+        pass
+    return None
+
+
+def _run(cmd, timeout=180):
+    """Run a command and return (returncode, stdout+stderr)."""
+    logger.info('Running: %s', ' '.join(cmd))
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        out = (p.stdout or '') + (p.stderr or '')
+        return p.returncode, out
+    except subprocess.TimeoutExpired:
+        return -1, f'Command timed out after {timeout}s'
+    except FileNotFoundError as e:
+        return -2, str(e)
+    except Exception as e:
+        return -3, str(e)
+
+
+def verify_containers_running(compose_path, project_name=None):
+    """Check that containers from this compose project are actually running."""
+    base = ['docker', 'compose']
+    if project_name:
+        base = base + ['-p', project_name]
+    cmd = base + ['-f', str(compose_path), 'ps', '--format', '{{.Name}} {{.Status}}']
+    rc, out = _run(cmd, timeout=15)
+    if rc != 0:
+        return False, out
+    
+    lines = [l.strip() for l in out.splitlines() if l.strip()]
+    if not lines:
+        return False, 'No containers found'
+    
+    running = []
+    not_running = []
+    for line in lines:
+        parts = line.split(None, 1)
+        name = parts[0] if parts else ''
+        status = parts[1] if len(parts) > 1 else ''
+        if any(s in status.lower() for s in ('up', 'running', 'healthy')):
+            running.append(name)
+        else:
+            not_running.append((name, status))
+    
+    if not_running:
+        details = ', '.join(f'{n}: {s}' for n, s in not_running)
+        return False, f'Some containers not running: {details}'
+    
+    return True, f'{len(running)} container(s) running'
+
+
+def verify_containers_down(compose_path, project_name=None):
+    """Check that containers from this compose project are stopped/removed."""
+    base = ['docker', 'compose']
+    if project_name:
+        base = base + ['-p', project_name]
+    cmd = base + ['-f', str(compose_path), 'ps', '--format', '{{.Name}}']
+    rc, out = _run(cmd, timeout=15)
+    
+    # If compose ps fails, check via docker ps with label filter
+    if rc != 0:
+        cmd2 = ['docker', 'ps', '-a', '--filter', f'compose-project={project_name or compose_path.parent.name}', '--format', '{{.Names}}']
+        rc2, out2 = _run(cmd2, timeout=15)
+        if rc2 == 0 and not out2.strip():
+            return True, 'No containers found (verified via docker ps)'
+        return False, f'Containers still exist: {out2.strip()}'
+    
+    running = [l.strip() for l in out.splitlines() if l.strip()]
+    if running:
+        return False, f'Containers still exist: {running}'
+    
+    return True, 'All containers stopped/removed'
+
+
 def run_compose(compose_path, action, svc_name=None):
+    """Run docker compose up/down with verification.
+    
+    Returns (ok: bool, message: str).
+    """
     if not compose_path.exists():
         return False, 'compose file not found'
-
-    # Determine candidate project names to try (dirname, common names, none)
-    try:
-        project_name = compose_path.parent.name
-    except Exception:
-        project_name = None
-    project_candidates = []
+    
+    project_name = detect_project_name(compose_path)
+    
+    # Build command
+    cmd = ['docker', 'compose']
     if project_name:
-        project_candidates.append(project_name)
-    project_candidates.extend(['docker', 'services', None])
-
-    def _run(cmd_to_run):
-        logger.info('Running compose command: %s', ' '.join(cmd_to_run))
-        p = subprocess.run(cmd_to_run, capture_output=True, text=True, timeout=180)
-        out = (p.stdout or '') + (p.stderr or '')
-        logger.info('Compose command finished: returncode=%s', p.returncode)
-        logger.debug('Compose stdout: %s', p.stdout)
-        logger.debug('Compose stderr: %s', p.stderr)
-        return p.returncode, out
-
-    # Try primary candidates with `docker compose`
-    rc = None
-    out = ''
-    for proj in project_candidates:
-        base = ['docker', 'compose']
-        if proj:
-            base = base + ['-p', proj]
-        if action == 'up':
-            cmd = base + ['-f', str(compose_path), 'up', '-d']
-        else:
-            cmd = base + ['-f', str(compose_path), 'down']
-        try:
-            rc, out = _run(cmd)
-            if rc == 0:
-                # After a successful compose down, ensure containers with the service label are removed
-                if action == 'down' and svc_name:
-                    try:
-                        p2 = subprocess.run(['docker', 'ps', '-a', '--filter', f'label=com.docker.compose.service={svc_name}', '--format', '{{.ID}}'], capture_output=True, text=True, timeout=30)
-                        ids = [ln.strip() for ln in (p2.stdout or '').splitlines() if ln.strip()]
-                        if ids:
-                            removed = []
-                            for cid in ids:
-                                try:
-                                    subprocess.run(['docker', 'stop', cid], capture_output=True, text=True, timeout=60)
-                                    subprocess.run(['docker', 'rm', '-f', cid], capture_output=True, text=True, timeout=60)
-                                    removed.append(cid)
-                                except Exception:
-                                    logger.exception('Error stopping/removing container %s after compose down', cid)
-                            if removed:
-                                msg = f'Compose down finished; additionally removed containers by label: {removed}'
-                                out = (out or '') + '\n' + msg
-                    except Exception:
-                        logger.debug('Post-down label cleanup failed for %s', svc_name)
-                return True, out
-        except FileNotFoundError as e:
-            logger.warning('docker CLI not found: %s', e)
-            rc = None
-            out = str(e)
-            break
-        except Exception as e:
-            logger.exception('Error running compose command: %s', e)
-            rc = None
-            out = str(e)
-
-    # Try alternative forms: `docker compose --file` with same project candidates, then legacy `docker-compose`
-    alt_cmds = []
-    for proj in project_candidates:
-        base = ['docker', 'compose']
-        if proj:
-            base = base + ['-p', proj]
-        if action == 'up':
-            alt_cmds.append(base + ['--file', str(compose_path), 'up', '-d'])
-        else:
-            alt_cmds.append(base + ['--file', str(compose_path), 'down'])
+        cmd = cmd + ['-p', project_name]
+    cmd = cmd + ['-f', str(compose_path)]
     if action == 'up':
-        alt_cmds.append(['docker-compose', '-f', str(compose_path), 'up', '-d'])
+        cmd = cmd + ['up', '-d']
+    elif action == 'down':
+        cmd = cmd + ['down']
     else:
-        alt_cmds.append(['docker-compose', '-f', str(compose_path), 'down'])
-
-    for alt in alt_cmds:
-        try:
-            rc2, out2 = _run(alt)
-            if rc2 == 0:
-                logger.info('Compose succeeded with fallback: %s', ' '.join(alt))
-                # Also attempt label cleanup after a successful down
-                if action == 'down' and svc_name:
+        return False, f'Unknown action: {action}'
+    
+    rc, out = _run(cmd)
+    
+    if rc == 0:
+        # Verify post-action
+        time.sleep(2)  # brief grace period
+        if action == 'up':
+            ok, msg = verify_containers_running(compose_path, project_name)
+            if not ok:
+                return False, f'Compose up succeeded but verification failed: {msg}\nOutput: {out}'
+        elif action == 'down':
+            ok, msg = verify_containers_down(compose_path, project_name)
+            if not ok:
+                # Try force remove via labels as fallback
+                if svc_name:
                     try:
-                        p2 = subprocess.run(['docker', 'ps', '-a', '--filter', f'label=com.docker.compose.service={svc_name}', '--format', '{{.ID}}'], capture_output=True, text=True, timeout=30)
-                        ids = [ln.strip() for ln in (p2.stdout or '').splitlines() if ln.strip()]
+                        cmd_rm = ['docker', 'ps', '-a', '--filter', f'label=com.docker.compose.service={svc_name}', '--format', '{{.ID}}']
+                        rc_rm, out_rm = _run(cmd_rm, timeout=15)
+                        ids = [ln.strip() for ln in (out_rm or '').splitlines() if ln.strip()]
                         if ids:
-                            removed = []
                             for cid in ids:
-                                try:
-                                    subprocess.run(['docker', 'stop', cid], capture_output=True, text=True, timeout=60)
-                                    subprocess.run(['docker', 'rm', '-f', cid], capture_output=True, text=True, timeout=60)
-                                    removed.append(cid)
-                                except Exception:
-                                    logger.exception('Error stopping/removing container %s after compose fallback', cid)
-                            if removed:
-                                msg = f'Fallback compose finished; additionally removed containers by label: {removed}'
-                                out2 = (out2 or '') + '\n' + msg
-                    except Exception:
-                        logger.debug('Post-down label cleanup failed for %s', svc_name)
-                return True, out2
-            if 'unknown shorthand flag' in (out2 or '').lower() or 'unknown flag' in (out2 or '').lower():
-                logger.warning('Compose fallback reported shorthand/unknown flag: %s', out2.splitlines()[:3])
-            else:
-                logger.info('Compose fallback returned non-zero: %s', rc2)
-        except FileNotFoundError:
-            logger.debug('Fallback command not found: %s', alt[0])
-        except Exception:
-            logger.exception('Error running fallback compose command: %s', alt)
-
-    # If subprocess attempts failed, for `down` try a CLI label-based fallback
-    # This avoids needing the compose file path to exist inside the container.
-    if action == 'down':
-        # First attempt: CLI fallback using container labels
-        if svc_name:
-            try:
-                logger.info('Attempting CLI label-based fallback for compose down for service %s', svc_name)
-                p = subprocess.run(['docker', 'ps', '-a', '--filter', f'label=com.docker.compose.service={svc_name}', '--format', '{{.ID}}'], capture_output=True, text=True, timeout=30)
-                ids = [ln.strip() for ln in (p.stdout or '').splitlines() if ln.strip()]
-                if ids:
-                    removed = []
-                    for cid in ids:
-                        try:
-                            subprocess.run(['docker', 'stop', cid], capture_output=True, text=True, timeout=60)
-                            subprocess.run(['docker', 'rm', '-f', cid], capture_output=True, text=True, timeout=60)
-                            removed.append(cid)
-                        except Exception:
-                            logger.exception('Error stopping/removing container %s via CLI fallback', cid)
-                    msg = f'CLI label fallback removed containers: {removed}'
-                    logger.info(msg)
-                    return True, msg
-            except Exception as e:
-                logger.debug('CLI label fallback failed: %s', e)
-
-        # If CLI label fallback didn't run or didn't find containers, try Docker SDK fallback (stop/remove containers by service label)
-        try:
-            import docker
-            logger.info('Attempting docker SDK fallback for compose down')
-            # parse compose file to get service names if possible
-            services = set()
-            try:
-                # import PyYAML only when needed; it's optional
-                try:
-                    import yaml as _yaml
-                except Exception:
-                    _yaml = None
-                if _yaml:
-                    with open(compose_path, 'r') as fh:
-                        doc = _yaml.safe_load(fh)
-                        if isinstance(doc, dict):
-                            services = set(doc.get('services', {}).keys())
-                else:
-                    services = set()
-            except Exception:
-                services = set()
-            client = docker.from_env()
-            removed = []
-            for c in client.containers.list(all=True):
-                labels = c.labels or {}
-                svc = labels.get('com.docker.compose.service')
-                if svc and (not services or svc in services):
+                                _run(['docker', 'stop', cid], timeout=30)
+                                _run(['docker', 'rm', '-f', cid], timeout=30)
+                            # Verify again
+                            ok2, msg2 = verify_containers_down(compose_path, project_name)
+                            if ok2:
+                                return True, f'Containers removed via fallback cleanup. Original: {out}'
+                            return False, f'Containers still present after cleanup: {msg2}'
+                    except Exception as e:
+                        logger.debug('Post-down cleanup failed: %s', e)
+                return False, f'Compose down succeeded but containers still present: {msg}'
+        return True, out
+    
+    # Compose failed — try with no project name
+    if project_name:
+        cmd_no_proj = ['docker', 'compose', '-f', str(compose_path)]
+        if action == 'up':
+            cmd_no_proj = cmd_no_proj + ['up', '-d']
+        else:
+            cmd_no_proj = cmd_no_proj + ['down']
+        rc2, out2 = _run(cmd_no_proj)
+        if rc2 == 0:
+            time.sleep(2)
+            if action == 'up':
+                ok, msg = verify_containers_running(compose_path, None)
+                if not ok:
+                    return False, f'Compose up (no project) succeeded but verification failed: {msg}'
+            elif action == 'down':
+                ok, msg = verify_containers_down(compose_path, None)
+                if not ok and svc_name:
+                    # Fallback label cleanup
                     try:
-                        if c.status == 'running':
-                            c.stop(timeout=10)
-                        c.remove(v=True, force=True)
-                        removed.append(c.name)
+                        cmd_rm = ['docker', 'ps', '-a', '--filter', f'label=com.docker.compose.service={svc_name}', '--format', '{{.ID}}']
+                        rc_rm, out_rm = _run(cmd_rm, timeout=15)
+                        ids = [ln.strip() for ln in (out_rm or '').splitlines() if ln.strip()]
+                        if ids:
+                            for cid in ids:
+                                _run(['docker', 'stop', cid], timeout=30)
+                                _run(['docker', 'rm', '-f', cid], timeout=30)
+                            return True, f'Containers removed via fallback cleanup'
                     except Exception:
-                        logger.exception('Error stopping/removing container %s', c.name)
-            msg = f'docker SDK fallback removed containers: {removed}'
-            return True, msg
+                        pass
+                    return False, f'Containers still present: {msg}'
+            return True, out2
+    
+    # For `down` with no compose success, try label-based fallback
+    if action == 'down' and svc_name:
+        try:
+            cmd_rm = ['docker', 'ps', '-a', '--filter', f'label=com.docker.compose.service={svc_name}', '--format', '{{.ID}}']
+            rc_rm, out_rm = _run(cmd_rm, timeout=15)
+            ids = [ln.strip() for ln in (out_rm or '').splitlines() if ln.strip()]
+            if ids:
+                removed = []
+                for cid in ids:
+                    _run(['docker', 'stop', cid], timeout=30)
+                    _run(['docker', 'rm', '-f', cid], timeout=30)
+                    removed.append(cid)
+                if removed:
+                    return True, f'Containers removed via label fallback: {removed}'
         except Exception as e:
-            logger.debug('Docker SDK fallback not available or failed: %s', e)
-
-    msg = 'All compose invocation attempts failed. Last output: ' + (out or '')
-    return False, msg
+            logger.debug('Label fallback failed: %s', e)
+    
+    return False, f'Compose command failed (rc={rc}): {out}'
 
 
 def get_status(service, kuma=None):
+    """Determine local status of a service."""
     compose_path = None
     try:
         compose_path = service.get('__compose_path')
     except Exception:
-        compose_path = None
-    # If no compose path, skip docker check
+        pass
+    
     if compose_path:
-        # Try ps with project candidates (same logic as run_compose)
-        try:
-            try:
-                project_name = compose_path.parent.name
-            except Exception:
-                project_name = None
-            project_candidates = []
-            if project_name:
-                project_candidates.append(project_name)
-            project_candidates.extend(['docker', 'services', None])
-            for proj in project_candidates:
-                base = ['docker', 'compose']
-                if proj:
-                    base = base + ['-p', proj]
-                cmd = base + ['-f', str(compose_path), 'ps']
-                try:
-                    p = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-                    out = (p.stdout or '') + (p.stderr or '')
-                    lowered = out.lower()
-                    if any(tok in lowered for tok in ('up', 'running', 'healthy', 'started')):
-                        return 'running'
-                except FileNotFoundError:
-                    logger.warning('docker CLI not found; continuing with Kuma/HTTP probe for %s', service.get('name'))
-                    break
-                except Exception:
-                    logger.debug('docker compose ps failed for %s with project %s', service.get('name'), proj)
-        except Exception:
-            logger.exception('Error preparing docker compose ps for %s; continuing with Kuma/HTTP probe', service.get('name'))
-
-    # Try Kuma
+        project_name = detect_project_name(compose_path)
+        base = ['docker', 'compose']
+        if project_name:
+            base = base + ['-p', project_name]
+        cmd = base + ['-f', str(compose_path), 'ps']
+        rc, out = _run(cmd, timeout=15)
+        if rc == 0:
+            lowered = out.lower()
+            if any(tok in lowered for tok in ('up', 'running', 'healthy')):
+                return 'running'
+            if any(tok in lowered for tok in ('exited', 'stopped', 'dead')):
+                return 'stopped'
+        else:
+            logger.debug('docker compose ps failed for %s', service.get('name'))
+    
+    # Fallback to Kuma
     try:
         mon = find_kuma_monitor_for_service(service, kuma)
         if mon and isinstance(mon, dict):
@@ -245,17 +235,16 @@ def get_status(service, kuma=None):
             if sc is not None:
                 return 'running' if sc == 1 else 'stopped'
     except Exception:
-        logger.debug('Kuma fallback failed for %s', service.get('name'))
-
-    # HTTP probe
+        pass
+    
+    # Fallback to HTTP probe
     url = service.get('url')
     if url:
         try:
+            import requests
             resp = requests.get(url, timeout=3, allow_redirects=True, verify=False)
-            if resp.status_code and resp.status_code < 400:
-                return 'running'
-            return 'stopped'
+            return 'running' if resp.status_code < 400 else 'stopped'
         except Exception:
             return 'unknown'
-
+    
     return 'unknown'
