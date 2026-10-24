@@ -10,7 +10,6 @@ venv/
 .env.local
 
 # Runtime generato
-tailwind.css.tmp
 jobs.db
 
 # macOS
