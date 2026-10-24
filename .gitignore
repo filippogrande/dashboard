@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Ambiente
+.env
+.env.local
+
+# Runtime generato
+jobs.db
+
+# macOS
+.DS_Store
